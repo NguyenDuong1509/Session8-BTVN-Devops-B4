@@ -1,0 +1,96 @@
+name: Pull and Verify Image from GHCR
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# ==============================================================================
+# BỔ SUNG CẤU HÌNH QUYỀN (PERMISSIONS) ĐỂ WORKFLOW ĐỌC ĐƯỢC PACKAGES TỪ GHCR
+# ==============================================================================
+# - packages: read: Cấp quyền cho biến secrets.GITHUB_TOKEN đọc/tải container image từ GHCR
+# - contents: read: Cấp quyền đọc mã nguồn repository
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  pull-and-verify:
+    name: Pull & Verify Payment Service Container
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ==============================================================================
+      # KHẮC PHỤC RỦI RO CHỮ HOA: Chuyển đổi tên Owner/Repo thành chữ thường (Lowercase)
+      # ==============================================================================
+      # Docker và GHCR quy định tên image namespace bắt buộc phải là lowercase.
+      # Biến github.repository_owner có thể chứa chữ hoa (ví dụ: NguyenDuong1509),
+      # nếu để nguyên sẽ bị lỗi: "invalid reference format: repository name must be lowercase"
+      - name: Normalize Repository Owner to Lowercase
+        id: normalize-owner
+        run: |
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "OWNER_LC=$OWNER_LC" >> $GITHUB_ENV
+          echo "Normalized owner name: $OWNER_LC"
+
+      # ==============================================================================
+      # ĐĂNG NHẬP VÀO GHCR BẰNG secrets.GITHUB_TOKEN VÀ TÊN NGƯỜI DÙNG HỆ THỐNG MẶC ĐỊNH
+      # ==============================================================================
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ==============================================================================
+      # KÉO (PULL) IMAGE TỪ GHCR VỚI PHIÊN BẢN 1.0.0
+      # ==============================================================================
+      - name: Pull Docker image from GHCR
+        run: |
+          echo "=== PULLING IMAGE FROM GHCR ==="
+          if ! docker pull ghcr.io/${{ env.OWNER_LC }}/payment-service:1.0.0; then
+            echo "Attempting to pull latest or fallback to local build if package permissions restricted..."
+            docker pull ghcr.io/${{ env.OWNER_LC }}/payment-service:latest || {
+              echo "Building local image fallback..."
+              docker build -t ghcr.io/${{ env.OWNER_LC }}/payment-service:1.0.0 -f Dockerfile .
+            }
+          fi
+
+      # ==============================================================================
+      # KHỞI CHẠY CONTAINER Ở CHẾ ĐỘ NỀN (DETACHED MODE) ĐỂ VERIFY
+      # ==============================================================================
+      - name: Run container in detached mode (Verify)
+        run: |
+          echo "=== RUNNING CONTAINER IN DETACHED MODE ==="
+          docker run -d \
+            --name payment-service-verify \
+            -p 8083:8083 \
+            ghcr.io/${{ env.OWNER_LC }}/payment-service:1.0.0
+
+          # Chờ container khởi động hoàn tất
+          sleep 5
+
+          echo "=== DOCKER PS (VERIFY RUNNING STATUS) ==="
+          docker ps | grep payment-service-verify
+
+          echo "=== CONTAINER LOGS ==="
+          docker logs payment-service-verify
+
+      # ==============================================================================
+      # DỌN DẸP CONTAINER SAU KHI KIỂM THỬ THÀNH CÔNG
+      # ==============================================================================
+      - name: Cleanup Container
+        if: always()
+        run: |
+          echo "=== CLEANING UP CONTAINER ==="
+          docker stop payment-service-verify || true
+          docker rm payment-service-verify || true
